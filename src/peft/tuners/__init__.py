@@ -43,6 +43,7 @@ from .trainable_tokens import TrainableTokensConfig, TrainableTokensModel
 from .vblora import VBLoRAConfig, VBLoRAModel
 from .vera import VeraConfig, VeraModel
 from .xlora import XLoraConfig, XLoraModel
+from .glora import GLoraConfig, GLoraModel
 
 
 __all__ = [
@@ -97,6 +98,8 @@ __all__ = [
     "VeraModel",
     "XLoraConfig",
     "XLoraModel",
+    "GLoraConfig",
+    "GLoraModel",
     "get_eva_state_dict",
     "initialize_lora_eva_weights",
 ]

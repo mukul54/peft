@@ -188,6 +188,8 @@ def get_peft_model_state_dict(
         to_return["base_model.vblora_vector_bank." + adapter_name] = state_dict[
             "base_model.vblora_vector_bank." + adapter_name
         ]
+    elif config.peft_type == PeftType.GLORA:
+        to_return = {k: state_dict[k] for k in state_dict if "glora_" in k}
     elif config.peft_type in list(PeftType):
         prefix = PEFT_TYPE_TO_PREFIX_MAPPING[config.peft_type]
         to_return = {k: state_dict[k] for k in state_dict if prefix in k}
@@ -365,6 +367,8 @@ def set_peft_model_state_dict(
         peft_model_state_dict = state_dict
     elif config.peft_type == PeftType.XLORA:
         peft_model_state_dict = state_dict
+    elif config.peft_type == PeftType.GLORA:
+        peft_model_state_dict = state_dict
     elif config.peft_type in PEFT_TYPE_TO_PREFIX_MAPPING:
         peft_model_state_dict = {}
         parameter_prefix = PEFT_TYPE_TO_PREFIX_MAPPING[config.peft_type]
@@ -432,6 +436,7 @@ def set_peft_model_state_dict(
                 return k
 
             peft_model_state_dict = {renamed_dora_weights(k): v for k, v in peft_model_state_dict.items()}
+
     else:
         raise NotImplementedError
 
