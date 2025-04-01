@@ -26,12 +26,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from ..import_utils import is_bnb_4bit_available, is_bnb_available
-from ..utils import (
-    COMMON_LAYERS_PATTERN,
+from peft.import_utils import is_bnb_4bit_available, is_bnb_available
+from peft.config import PeftConfig
+from peft.utils import (
     TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
     ModulesToSaveWrapper,
-    PeftConfig,
     PeftType,
     _freeze_adapter,
     _get_submodules,
