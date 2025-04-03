@@ -28,13 +28,15 @@ from tqdm import tqdm
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.config import PeftConfig
+from peft.tuners.tuners_utils import BaseTuner
+
 from peft.utils import (
     TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
     ModulesToSaveWrapper,
     PeftType,
     _freeze_adapter,
     _get_submodules,
-    transpose,
+    transpose
 )
 
 
@@ -75,25 +77,21 @@ class GLoraConfig(PeftConfig):
         self.peft_type = PeftType.GLORA
 
 
-class GLoraModel(torch.nn.Module):
+class GLoraModel(BaseTuner):
     """
-    Creates Generalized Low Rank Adapter (GLora) model from a pretrained transformers model.
+    Creates a GLoRA (Group Lora) model from a pretrained transformers model.
 
     Args:
         model ([`~transformers.PreTrainedModel`]): The model to be adapted.
-        config ([`GLoraConfig`]): The configuration of the Lora model.
+        config ([`GLoraConfig`]): The configuration of the GLoRA model.
+        adapter_name (`str`): The name of the adapter, defaults to `"default"`.
 
-    Returns:
-        `torch.nn.Module`: The Lora model.
+    Example::
 
-    Example:
-
-        ```py
-        >>> from transformers import AutoModelForSeq2SeqLM, GLoraConfig
-        >>> from peft import GLoraModel, GLoraConfig
+        >>> from transformers import AutoModelForSeq2SeqLM
+        >>> from peft import GLoraConfig, GLoraModel
 
         >>> config = GLoraConfig(
-        ...     peft_type="GLORA",
         ...     task_type="SEQ_2_SEQ_LM",
         ...     r=8,
         ...     target_modules=["q", "v"],
@@ -130,167 +128,185 @@ class GLoraModel(torch.nn.Module):
         - **peft_config** ([`GLoraConfig`]): The configuration of the Lora model.
     """
 
-    def __init__(self, model, config, adapter_name):
-        super().__init__()
-        self.model = model
-        self.forward = self.model.forward
-        self.peft_config = config
-        self.add_adapter(adapter_name, self.peft_config[adapter_name])
+    def __init__(self, model, peft_config, adapter_name="default"):
+        super().__init__(model, peft_config, adapter_name)
 
-    def add_adapter(self, adapter_name, config=None):
-        if config is not None:
-            model_config = self.model.config.to_dict() if hasattr(self.model.config, "to_dict") else self.model.config
-            config = self._prepare_glora_config(config, model_config)
-            self.peft_config[adapter_name] = config
-        self._find_and_replace(adapter_name)
-        if len(self.peft_config) > 1 and self.peft_config[adapter_name].bias != "none":
-            raise ValueError(
-                "LoraModel supports only 1 adapter with bias. When using multiple adapters, set bias to 'none' for all adapters."
-            )
-        mark_only_glora_as_trainable(self.model)
-        if self.peft_config[adapter_name].inference_mode:
-            _freeze_adapter(self.model, adapter_name)
-
-    def _check_target_module_exists(self, glora_config, key):
-        if isinstance(glora_config.target_modules, str):
-            target_module_found = re.fullmatch(glora_config.target_modules, key)
-        else:
-            target_module_found = any(key.endswith(target_key) for target_key in glora_config.target_modules)
-        return target_module_found
-
-    def _create_new_module(self, lora_config, adapter_name, target):
-        bias = hasattr(target, "bias") and target.bias is not None
-        kwargs = {
-            "r": lora_config.r
-        }
-        if isinstance(target, torch.nn.Linear):
-            in_features, out_features = target.in_features, target.out_features
-        new_module = Linear(adapter_name, in_features, out_features, bias=bias, **kwargs)
-
-        return new_module
-
-    def _find_and_replace(self, adapter_name):
-        glora_config = self.peft_config[adapter_name]
-        is_target_modules_in_base_model = False
-        key_list = [key for key, _ in self.model.named_modules()]
-        for key in key_list:
-            if not self._check_target_module_exists(glora_config, key):
-                continue
-
-            is_target_modules_in_base_model = True
-            parent, target, target_name = _get_submodules(self.model, key)
-            new_module = self._create_new_module(glora_config, adapter_name, target)
-            self._replace_module(parent, target_name, new_module, target)
-
-        if not is_target_modules_in_base_model:
-            raise ValueError(
-                f"Target modules {glora_config.target_modules} not found in the base model. "
-                f"Please check the target modules and try again."
-            )
-
-    def _replace_module(self, parent_module, child_name, new_module, old_module):
-        setattr(parent_module, child_name, new_module)
-        new_module.weight = old_module.weight
-        if hasattr(old_module, "bias"):
-            if old_module.bias is not None:
-                new_module.bias = old_module.bias
-
-        if getattr(old_module, "state", None) is not None:
-            new_module.state = old_module.state
-            new_module.to(old_module.weight.device)
-
-        # dispatch to correct device
-        for name, module in new_module.named_modules():
-            if "glora_" in name:
-                module.to(old_module.weight.device)
-            if "ranknum" in name:
-                module.to(old_module.weight.device)
-
-    def __getattr__(self, name: str):
-        """Forward missing attributes to the wrapped module."""
-        try:
-            return super().__getattr__(name)  # defer to nn.Module's logic
-        except AttributeError:
-            return getattr(self.model, name)
-
-    def get_peft_config_as_dict(self, inference: bool = False):
-        config_dict = {}
-        for key, value in self.peft_config.items():
-            config = {k: v.value if isinstance(v, Enum) else v for k, v in asdict(value).items()}
-            if inference:
-                config["inference_mode"] = True
-        config_dict[key] = config
-        return config
-
-    @staticmethod
-    def _prepare_glora_config(peft_config, model_config):
+    def _prepare_adapter_config(self, peft_config, model_config):
+        """
+        Prepares the adapter config.
+        """
         if peft_config.target_modules is None:
             if model_config["model_type"] not in TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING:
-                raise ValueError("Please specify `target_modules` in `peft_config`")
+                raise ValueError(
+                    f"Target modules are not specified in the config and no default target modules exist for "
+                    f"{model_config['model_type']}."
+                )
             peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
         return peft_config
 
-    @staticmethod
-    def _replace_module(parent, child_name, new_module, child):
-        setattr(parent, child_name, new_module)
-        new_module.weight = child.weight
-        if hasattr(child, "bias"):
-            if child.bias is not None:
-                new_module.bias = child.bias
-
-        if getattr(child, "state", None) is not None:
-            new_module.state = child.state
-            new_module.to(child.weight.device)
-
-        # dispatch to correct device
-        for name, module in new_module.named_modules():
-            if "glora_" in name:
-                module.to(child.weight.device)
-            if "ranknum" in name:
-                module.to(child.weight.device)
-
-    def merge_and_unload(self, progressbar: bool = False):
-        r"""
-        This method merges the LoRa layers into the base model. This is needed if someone wants to use the base model
-        as a standalone model.
-
-        Args:
-            progressbar (bool): whether to show a progressbar indicating the unload and merge process
-
-        Example:
-
-        ```py
-        >>> from transformers import AutoModelForCausalLM
-        >>> from peft import PeftModel
-
-        >>> base_model = AutoModelForCausalLM.from_pretrained("tiiuae/falcon-40b")
-        >>> peft_model_id = "smangrul/falcon-40B-int4-peft-glora-sfttrainer-sample"
-        >>> model = PeftModel.from_pretrained(base_model, peft_model_id)
-        >>> merged_model = model.merge_and_unload()
-        ```
+    def _check_target_module_exists(self, peft_config, key):
         """
-        return self._unload_and_optionally_merge(progressbar=progressbar)
+        A helper method to check if the passed module's key name matches any of the target modules in the
+        peft_config.target_modules list. If it does, return True, else return False.
+        
+        Args:
+            peft_config (PeftConfig): The adapter config.
+            key (str): The module's key name.
+        """
+        if isinstance(peft_config.target_modules, str):
+            target_modules = [peft_config.target_modules]
+        else:
+            target_modules = peft_config.target_modules
 
-    def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False):
+        return any(key.endswith(target_key) for target_key in target_modules)
 
-        key_list = [key for key, _ in self.model.named_modules() if "glora" not in key]
-        for key in tqdm(key_list, disable=not progressbar ):
-            try:
-                parent, target, target_name = _get_submodules(self.model, key)
-            except AttributeError:
-                continue
-            if isinstance(target, GLoraLayer):
-                bias = True
-                new_module = torch.nn.Linear(target.in_features, target.out_features, bias=bias)
-                if merge:
-                    target.merge()
-                self._replace_module(parent, target_name, new_module, target)
+    def _create_and_replace(self, peft_config, adapter_name, target, target_name, parent, current_key):
+        """
+        Creates and replaces a target module with a GLoRA layer.
+        """
+        # Create the replacement GLoRA module
+        bias = hasattr(target, "bias") and target.bias is not None
+        
+        # Only use attributes that exist in GLoraConfig
+        kwargs = {
+            "r": peft_config.r,
+        }
+        
+        # Create the GLoRA module based on the target type
+        if isinstance(target, nn.Linear):
+            # Use the correct parameters for the Linear constructor
+            glora_layer = Linear(
+                adapter_name=adapter_name, 
+                in_features=target.in_features, 
+                out_features=target.out_features, 
+                **kwargs
+            )
+            
+            # Copy the weights from the original module
+            glora_layer.weight.data = target.weight.data.clone()
+            if bias:
+                glora_layer.bias.data = target.bias.data.clone()
+                
+            # Update the list of modules we've modified
+            self.targeted_module_names.append(current_key)
+            
+            # Replace the original module with the GLoRA module
+            parent._modules[target_name] = glora_layer
+        else:
+            # For other layer types, customize as needed
+            return
 
-            # save any additional trainable modules part of `modules_to_save`
-            if isinstance(target, ModulesToSaveWrapper):
-                setattr(parent, target_name, target.modules_to_save[target.active_adapter])
+    def _mark_only_adapters_as_trainable(self, model):
+        """
+        Marks only the GLoRA adapters as trainable.
+        """
+        for param in model.parameters():
+            param.requires_grad = False
 
-        return self.model
+        # Set requires_grad for GLoRA layers
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True
+
+    def enable_adapter_layers(self):
+        """
+        Enables adapter layers
+        """
+        for module in self.model.modules():
+            if isinstance(module, Linear):
+                module.enable_adapters()
+
+    def disable_adapter_layers(self):
+        """
+        Disables adapter layers
+        """
+        for module in self.model.modules():
+            if isinstance(module, Linear):
+                module.disable_adapters()
+    
+    def set_adapter(self, adapter_names):
+        """
+        Set the active adapters.
+        
+        Args:
+            adapter_names (str or List[str]): Name of the adapter(s) to be activated.
+        """
+        # Store the active adapter(s)
+        self.active_adapter = adapter_names
+        
+        # Enable the active adapters in all Linear layers
+        for module in self.model.modules():
+            if isinstance(module, Linear):
+                if isinstance(adapter_names, list) and len(adapter_names) > 0:
+                    module.active_adapter = adapter_names[0]
+                else:
+                    module.active_adapter = adapter_names
+                
+        return adapter_names
+        
+    def get_peft_config_as_dict(self, inference: bool = False):
+        """
+        Returns the config as a dictionary for saving.
+        """
+        config_dict = {}
+        for adapter_name, adapter_config in self.peft_config.items():
+            config_dict[adapter_name] = adapter_config.to_dict()
+        return config_dict
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        """
+        Prepare inputs for generation. This method is required for compatibility with
+        PeftModelForCausalLM when using get_peft_model().
+        
+        This method passes through to the underlying model's prepare_inputs_for_generation
+        method if it exists, otherwise it returns the kwargs unchanged.
+        """
+        if hasattr(self.model, "prepare_inputs_for_generation"):
+            return self.model.prepare_inputs_for_generation(*args, **kwargs)
+        # If no prepare_inputs_for_generation exists, create a default implementation
+        # that matches the standard transformer behavior
+        input_dict = kwargs
+        if args and not kwargs:
+            input_dict = dict(zip(['input_ids', 'attention_mask', 'past_key_values'], args))
+        return input_dict
+    
+    @property
+    def device(self):
+        """
+        Returns the device on which the model is located.
+        This is needed for compatibility with scripts that rely on model.device.
+        """
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            return next(self.model.parameters()).device
+
+    @property
+    def generation_config(self):
+        """
+        Returns the generation configuration for text generation.
+        This is needed for compatibility with PeftModelForCausalLM.generate().
+        """
+        if hasattr(self.model, "generation_config"):
+            return self.model.generation_config
+        # If the base model doesn't have generation_config, create a default one
+        from transformers import GenerationConfig
+        return GenerationConfig()
+        
+    @generation_config.setter
+    def generation_config(self, value):
+        """
+        Sets the generation configuration.
+        This is needed for compatibility with PeftModelForCausalLM.generate().
+        """
+        if hasattr(self.model, "generation_config"):
+            self.model.generation_config = value
+            
+    def generate(self, *args, **kwargs):
+        """
+        Pass through to model.generate().
+        """
+        return self.model.generate(*args, **kwargs)
 
 # Below code is based on https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # and modified to work with PyTorch FSDP
@@ -389,6 +405,8 @@ class Linear(nn.Linear, GLoraLayer):
 
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
+        # Move input to the same device as weights
+        x = x.to(self.weight.device)
         if self.eval_config is not None:
             path_config = self.eval_config
         else:
@@ -398,15 +416,35 @@ class Linear(nn.Linear, GLoraLayer):
         C = self.prepare_path(path_config['C'], self.glora_Cd, self.glora_Cu).to(self.weight.dtype)
         D = self.prepare_path(path_config['D'], self.glora_D).to(self.weight.dtype)
         E = self.prepare_path(path_config['E'], self.glora_E).to(self.weight.dtype)
+        # Ensure all tensors are on the same device and dtype before any operation
+        device = self.weight.device
+        dtype = self.weight.dtype
+        
+        # Move all individual tensors to the same device first
+        A = A.to(device=device, dtype=dtype)
+        B = B.to(device=device, dtype=dtype)
+        C = C.to(device=device, dtype=dtype)
+        D = D.to(device=device, dtype=dtype)
+        E = E.to(device=device, dtype=dtype)
+        
+        # Now compute with all tensors guaranteed to be on same device
+        weight_sum = self.weight + self.weight*A + B
+        
         if torch.is_tensor(self.bias):
-            result = F.linear(x, self.weight + self.weight*A + B, bias=self.bias + self.bias*D + E+torch.matmul(self.weight, C).squeeze())
+            # Properly handle the bias parameter without reassigning it
+            bias_to_use = self.bias.to(device=device, dtype=dtype)  # Create temporary tensor on right device
+            bias_sum = bias_to_use + bias_to_use*D + E + torch.matmul(self.weight, C).squeeze()
+            result = F.linear(x, weight_sum, bias=bias_sum)
         else:
-            result = F.linear(x, self.weight + self.weight*A + B, bias=E+torch.matmul(self.weight, C).squeeze())
+            bias_sum = E + torch.matmul(self.weight, C).squeeze()
+            result = F.linear(x, weight_sum, bias=bias_sum)
         result = result.to(previous_dtype)
 
         return result
     
     def prepare_path(self, config, Xd, Xu=None):
+        device = self.weight.device  # Get the device of the weight
+        
         if Xu is not None:
             if 'LoRA' in config:
                 rank = int(config.split('_')[1])
@@ -416,7 +454,7 @@ class Linear(nn.Linear, GLoraLayer):
             elif 'constant' in config:
                 X = Xd[0,0]
             elif 'none' in config:
-                X = torch.zeros(Xd.shape[0], Xu.shape[1]).to(self.weight.device)
+                X = torch.zeros(Xd.shape[0], Xu.shape[1], device=device)  # Create directly on device
             else:
                 raise ValueError
         else:
@@ -425,7 +463,8 @@ class Linear(nn.Linear, GLoraLayer):
             elif 'constant' in config:
                 X = Xd[0]
             elif 'none' in config:
-                X = torch.zeros(1).to(self.weight.device)
+                X = torch.zeros(1, device=device)  # Create directly on device
             else:
                 raise ValueError
-        return X
+                
+        return X.to(device)  # Ensure return tensor is on the correct device

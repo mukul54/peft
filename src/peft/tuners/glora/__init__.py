@@ -24,4 +24,5 @@ register_peft_method(
     name="glora",  # lowercase name
     config_cls=GLoraConfig,
     model_cls=GLoraModel,
+    is_mixed_compatible=True
 )
