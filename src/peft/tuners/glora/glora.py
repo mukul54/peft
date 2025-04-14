@@ -307,6 +307,16 @@ class GLoraModel(BaseTuner):
         Pass through to model.generate().
         """
         return self.model.generate(*args, **kwargs)
+        
+    @property
+    def config(self):
+        """
+        Returns the configuration object of the base model.
+        This is needed for compatibility with the PeftModel forward method.
+        """
+        if hasattr(self.model, "config"):
+            return self.model.config
+        return None
 
 # Below code is based on https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # and modified to work with PyTorch FSDP
