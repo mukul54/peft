@@ -14,10 +14,13 @@
 
 from peft.utils import register_peft_method
 
-from .glora import GLoraConfig, GLoraModel
+# Import from the new structured modules
+from .config import GLoraConfig
+from .model import GLoraModel
+from .layer import Linear, GLoraLayer
 
-
-__all__ = ["GLoraConfig", "GLoraModel"]
+# Re-export the primary classes
+__all__ = ["GLoraConfig", "GLoraModel", "Linear", "GLoraLayer"]
 
 # Register the GLORA method
 register_peft_method(
