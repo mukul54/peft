@@ -156,20 +156,30 @@ class Linear(nn.Linear, GLoraLayer):
             self.eval_config = self.configs[0]
             
         path_config = self.eval_config
-        A = self.prepare_path(path_config['A'], self.glora_Ad, self.glora_Au).to(self.weight.dtype)
-        B = self.prepare_path(path_config['B'], self.glora_Bd, self.glora_Bu).to(self.weight.dtype)
-        C = self.prepare_path(path_config['C'], self.glora_Cd, self.glora_Cu).to(self.weight.dtype)
-        D = self.prepare_path(path_config['D'], self.glora_D).to(self.weight.dtype)
-        E = self.prepare_path(path_config['E'], self.glora_E).to(self.weight.dtype)
+        # Ensure all tensors are on the same device and have the same dtype
+        device = self.weight.device
+        dtype = self.weight.dtype
+        
+        A = self.prepare_path(path_config['A'], self.glora_Ad, self.glora_Au).to(device=device, dtype=dtype)
+        B = self.prepare_path(path_config['B'], self.glora_Bd, self.glora_Bu).to(device=device, dtype=dtype)
+        C = self.prepare_path(path_config['C'], self.glora_Cd, self.glora_Cu).to(device=device, dtype=dtype)
+        D = self.prepare_path(path_config['D'], self.glora_D).to(device=device, dtype=dtype)
+        E = self.prepare_path(path_config['E'], self.glora_E).to(device=device, dtype=dtype)
         
         # Merge into weight
         self.weight.data += self.weight*A + B
         
         # Merge into bias
         if torch.is_tensor(self.bias):
-            self.bias.data += self.bias*D + E+torch.matmul(self.weight, C).squeeze()
+            # Make sure bias is on the correct device
+            if self.bias.device != device:
+                # We need to keep it as a Parameter
+                self.bias.data = self.bias.data.to(device)
+            weight_C = torch.matmul(self.weight, C).squeeze()
+            self.bias.data += self.bias*D + E + weight_C
         else:
-            self.bias = nn.Parameter(E+torch.matmul(self.weight, C).squeeze())
+            weight_C = torch.matmul(self.weight, C).squeeze()
+            self.bias = nn.Parameter((E + weight_C).to(device))
             
         self.merged = True
 
